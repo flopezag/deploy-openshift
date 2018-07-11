@@ -1,0 +1,7 @@
+---
+# IP address of the virtual machine in which
+# this ansible is deployed
+ip_address: <IP of the Virtual Machine>
+line: #DOCKER_OPTS="--dns 8.8.8.8 --dns 8.8.4.4"
+comment: # Adding the registry to the INSECURE_REGISTRY line and uncommenting it.
+docker_opts: DOCKER_OPTS ='--insecure-registry 172.30.0.0/16'

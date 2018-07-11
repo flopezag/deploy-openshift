@@ -1,0 +1,197 @@
+---
+# ------------------------
+# Deploy the general stuff
+# ------------------------
+- hosts: docker-fiware
+  become: yes
+  # strategy: debug
+
+  vars_files:
+    - vars/main.yml
+
+  # Update and Upgrade the ubuntu instance
+  pre_tasks:
+    - name: Update APT cache
+      apt: update_cache=yes
+
+    - name: Upgrade packages
+      apt: upgrade=dist
+
+    - name: Check if a reboot is required
+      register: reboot_required_file
+      stat: path=/var/run/reboot-required get_md5=no
+
+    - name: restart machine
+      become: yes
+      shell: sleep 2 && shutdown -r now "Ansible updates triggered"
+      async: 1
+      poll: 0
+      ignore_errors: true
+      when: reboot_required_file.stat.exists == true
+
+    - name: Waiting for server to come back
+      become: no
+      local_action: wait_for
+        port=22
+        host={{ inventory_hostname }}
+        search_regex=OpenSSH
+        delay=10
+
+
+  tasks:
+    # General tasks, install vim
+    - name: Install apt-transport-https, ca-certificates, curl, software-properties-common, ppa-purge and NTP server
+      apt: name={{ item }} update_cache=yes state=latest
+      with_items:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - software-properties-common
+        - ppa-purge
+        - ntp
+        - docker-registry
+
+    - name: disable net.ipv6.conf.all.disable_ipv6
+      sysctl: name=net.ipv6.conf.all.disable_ipv6 value=1 state=present
+
+    - name: disable net.ipv6.conf.default.disable_ipv6
+      sysctl: name=net.ipv6.conf.default.disable_ipv6 value=1 state=present
+ 
+    - name: disable net.ipv6.conf.lo.disable_ipv6
+      sysctl: name=net.ipv6.conf.lo.disable_ipv6 value=1 state=present
+
+    - name: Check hostname
+      command: hostname
+      register: hostname
+
+    - debug:
+        msg: "{{ hostname }}"
+
+    - name: add myself to /etc/hosts
+      lineinfile:
+        dest: /etc/hosts
+        regexp: '^127\.0\.0\.1[ \t]+localhost'
+        line: '127.0.0.1 localhost {{hostname.stdout}}'
+        state: present
+
+    - name: Download gpg key
+      command: curl -fsSL -o /home/ubuntu/gpg https://download.docker.com/linux/ubuntu/gpg
+
+    - name: Add apt key
+      command: apt-key add /home/ubuntu/gpg
+
+    - name: Apt key fingerprint
+      command: apt-key fingerprint 0EBFCD88
+
+    - name: Check lsb_release
+      command: lsb_release -cs
+      register: lsb_rel
+
+    - name: Check uname -s
+      command: uname -s
+      register: uname_s
+
+    - name: Check uname -m
+      command: uname -m
+      register: uname_m
+
+    - debug:
+        msg: "{{ lsb_rel.stdout }}"
+
+    - debug:
+        msg: "{{ uname_s.stdout }}"
+
+    - debug:
+        msg: "{{ uname_m.stdout }}"
+
+    - name: Add apt-key repository
+      command: add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu "{{ lsb_rel.stdout }}" stable"
+
+    - name: Update repositories cache
+      apt:
+        update_cache: yes
+
+    - name: Install docker-ce
+      apt: name={{ item }} update_cache=yes state=latest
+      with_items:
+        - docker-ce
+
+    - name: Install docker-compose
+      command: curl -o /usr/local/bin/docker-compose -L https://github.com/docker/compose/releases/download/1.21.1/docker-compose-"{{ uname_s.stdout }}"-"{{ uname_m.stdout }}"
+
+    - name: Install Openshift Client
+      unarchive:
+        src: https://github.com/openshift/origin/releases/download/v3.9.0/openshift-origin-client-tools-v3.9.0-191fece-linux-64bit.tar.gz
+        dest: /usr/local/bin
+        remote_src: yes
+
+    - name: stat umcompress file
+      stat: path=/usr/local/bin/openshift-origin-client-tools-v3.9.0-191fece-linux-64bit
+      register: oc_stat
+
+    - name: Move oc uncompress file to oc-tool
+      command: mv /usr/local/bin/openshift-origin-client-tools-v3.9.0-191fece-linux-64bit/oc /usr/local/bin/oc
+      when: oc_stat.stat.exists
+
+    # change permission to a file
+    - name: Changing perm of "/usr/local/bin/docker-compose", adding "+x"
+      file: dest=/usr/local/bin/docker-compose mode=a+x
+
+    - name: Delete unused files (gpg)
+      file: path=/home/ubuntu/gpg state=absent
+
+    - name: configure docker to have insecure registry
+      lineinfile:
+        dest: /etc/default/docker
+        insertafter: '^{{ line }}$'
+        line: '{{ docker_opts }}'
+
+    - name: configure docker.service to add EnvironmentFile
+      lineinfile:
+        dest: /lib/systemd/system/docker.service
+        insertafter: '# for containers run by docker'
+        line: 'EnvironmentFile=/etc/default/docker'
+
+    - name: configure docker.service to add DOCKER_OPTS
+      lineinfile:
+        dest: /lib/systemd/system/docker.service
+        regexp: '^ExecStart=\/usr\/bin\/dockerd -H fd:\/\/'
+        line: 'ExecStart=/usr/bin/dockerd -H fd:// $DOCKER_OPTS'
+        state: present
+
+    - name: delete unused files (openshift client)
+      file: path=/usr/local/bin/openshift-origin-client-tools-v3.9.0-191fece-linux-64bit state=absent
+
+    - name: restart docker service
+      systemd:
+        state: restarted
+        daemon_reload: yes
+        name: docker
+
+    - name: create openshift cluster
+      command: oc cluster up --public-hostname={{ ip_address }}
+      register: oc_cluster
+
+    - name: check docker version
+      command: docker -v
+      register: docker
+
+    - name: check docker-compose version
+      command: docker-compose -v
+      register: docker_compose
+
+    - name: check openshift client version
+      command: oc version
+      register: oc
+
+    - debug:
+        msg: "{{ docker.stdout }}"
+
+    - debug:
+        msg: "{{ docker_compose.stdout }}"
+
+    - debug:
+        msg: "{{ oc.stdout }}"
+
+    - debug:
+        msg: "{{ oc_cluster.stdout }}"

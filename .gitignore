@@ -1,0 +1,8 @@
+# IDE
+.idea
+
+# Temporal Ansible execution
+deploy_fiware.retry
+
+# Python Virtual Environment
+env
